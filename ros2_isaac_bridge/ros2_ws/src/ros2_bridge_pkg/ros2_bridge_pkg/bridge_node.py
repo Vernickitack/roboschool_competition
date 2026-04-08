@@ -8,7 +8,7 @@ import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import Twist, TwistStamped
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, JointState, Imu
 
 
 CMD_IP = "127.0.0.1"
@@ -23,6 +23,11 @@ RGB_PORT = 5007
 DEPTH_IP = "127.0.0.1"
 DEPTH_PORT = 5008
 
+JOINT_STATE_IP = "127.0.0.1"
+JOINT_STATE_PORT = 5009
+
+IMU_IP = "127.0.0.1"
+IMU_PORT = 5010
 
 class BridgeNode(Node):
     def __init__(self):
@@ -41,6 +46,14 @@ class BridgeNode(Node):
         self.depth_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.depth_sock.bind((DEPTH_IP, DEPTH_PORT))
         self.depth_sock.setblocking(False)
+
+        self.joint_state_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.joint_state_sock.bind((JOINT_STATE_IP, JOINT_STATE_PORT))
+        self.joint_state_sock.setblocking(False)
+
+        self.imu_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.imu_sock.bind((IMU_IP, IMU_PORT))
+        self.imu_sock.setblocking(False)
 
         self.cmd_sub = self.create_subscription(
             Twist,
@@ -64,6 +77,18 @@ class BridgeNode(Node):
         self.depth_pub = self.create_publisher(
             Image,
             "/aliengo/camera/depth/image_raw",
+            10,
+        )
+
+        self.joint_state_pub = self.create_publisher(
+            JointState,
+            "/aliengo/joint_states",
+            10,
+        )
+
+        self.imu_pub = self.create_publisher(
+            Imu,
+            "/aliengo/imu",
             10,
         )
 
@@ -150,6 +175,50 @@ class BridgeNode(Node):
             pass
         except Exception as e:
             self.get_logger().error(f"depth receive error: {e}")
+
+        try:
+            data, _ = self.joint_state_sock.recvfrom(65535)
+
+            msg_in = json.loads(data.decode("utf-8"))
+
+            js = JointState()
+            js.header.stamp = self.get_clock().now().to_msg()
+            js.header.frame_id = "base"
+
+            js.name = msg_in.get("names", [])
+            js.position = msg_in.get("position", [])
+            js.velocity = msg_in.get("velocity", [])
+
+            self.joint_state_pub.publish(js)
+
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            self.get_logger().error(f"joint_state receive error: {e}")
+
+        try:
+            data, _ = self.imu_sock.recvfrom(4096)
+
+            msg_in = json.loads(data.decode("utf-8"))
+
+            imu = Imu()
+            imu.header.stamp = self.get_clock().now().to_msg()
+            imu.header.frame_id = "imu_link"
+
+            imu.angular_velocity.x = float(msg_in.get("wx", 0.0))
+            imu.angular_velocity.y = float(msg_in.get("wy", 0.0))
+            imu.angular_velocity.z = float(msg_in.get("wz", 0.0))
+
+            imu.linear_acceleration.x = float(msg_in.get("ax", 0.0))
+            imu.linear_acceleration.y = float(msg_in.get("ay", 0.0))
+            imu.linear_acceleration.z = float(msg_in.get("az", 0.0))
+
+            self.imu_pub.publish(imu)
+
+        except BlockingIOError:
+            pass
+        except Exception as e:
+            self.get_logger().error(f"imu receive error: {e}")
 
 
 def main(args=None):

@@ -11,3 +11,4 @@ models/*
 *.pth
 *.jit
 runs/
+README.md

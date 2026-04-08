@@ -16,6 +16,11 @@ RGB_PORT = 5007
 DEPTH_IP = "127.0.0.1"
 DEPTH_PORT = 5008
 
+JOINT_STATE_IP = "127.0.0.1"
+JOINT_STATE_PORT = 5009
+
+IMU_IP = "127.0.0.1"
+IMU_PORT = 5010
 
 class SimBridgeClient:
     def __init__(self):
@@ -32,6 +37,8 @@ class SimBridgeClient:
         self.state_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.rgb_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.depth_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.joint_state_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.imu_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
     def receive_cmd(self):
         try:
@@ -77,3 +84,26 @@ class SimBridgeClient:
 
         data = encoded.tobytes()
         self.depth_sock.sendto(data, (DEPTH_IP, DEPTH_PORT))
+
+    def send_joint_states(self, names, position, velocity):
+        msg = {
+            "names": list(names),
+            "position": [float(x) for x in position],
+            "velocity": [float(x) for x in velocity],
+            "timestamp": time.time(),
+        }
+        data = json.dumps(msg).encode("utf-8")
+        self.joint_state_sock.sendto(data, (JOINT_STATE_IP, JOINT_STATE_PORT))
+
+    def send_imu(self, ang_vel, lin_acc):
+        msg = {
+            "wx": float(ang_vel[0]),
+            "wy": float(ang_vel[1]),
+            "wz": float(ang_vel[2]),
+            "ax": float(lin_acc[0]),
+            "ay": float(lin_acc[1]),
+            "az": float(lin_acc[2]),
+            "timestamp": time.time(),
+        }
+        data = json.dumps(msg).encode("utf-8")
+        self.imu_sock.sendto(data, (IMU_IP, IMU_PORT))

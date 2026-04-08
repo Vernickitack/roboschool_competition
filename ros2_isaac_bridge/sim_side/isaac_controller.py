@@ -77,8 +77,8 @@ def load_env(label, headless=False):
     Cfg.env.front_camera_depth_height_px = 424
     Cfg.env.front_camera_color_fov_h_deg = 70.0
     Cfg.env.front_camera_depth_fov_h_deg = 86.0
-    Cfg.env.front_camera_offset_xyz = [0.35, 0.0, 0.10]
-    Cfg.env.front_camera_pitch_deg = 0.0
+    Cfg.env.front_camera_offset_xyz = [0.315, 0.0, 0.052]
+    Cfg.env.front_camera_pitch_deg = -4.0
 
     from aliengo_gym.envs.wrappers.history_wrapper import HistoryWrapper
 
@@ -105,6 +105,13 @@ def main():
     pitch_cmd = 0.0
     roll_cmd = 0.0
     stance_width_cmd = 0.25
+
+    JOINT_NAMES = [
+        "FL_hip_joint", "FL_thigh_joint", "FL_calf_joint",
+        "FR_hip_joint", "FR_thigh_joint", "FR_calf_joint",
+        "RL_hip_joint", "RL_thigh_joint", "RL_calf_joint",
+        "RR_hip_joint", "RR_thigh_joint", "RR_calf_joint",
+    ] # env.dof_names
 
     print("Isaac controller started.")
 
@@ -134,6 +141,12 @@ def main():
         measured_vy = env.base_lin_vel[0, 1].item()
         measured_wz = env.base_ang_vel[0, 2].item()
 
+        base_ang_vel = env.base_ang_vel[0, :].detach().cpu().numpy()
+        base_lin_acc = [0.0, 0.0, 0.0]
+
+        relative_dof_pos = (env.dof_pos[0, :] - env.default_dof_pos[0, :]).detach().cpu().numpy()
+        dof_vel = env.dof_vel[0, :].detach().cpu().numpy()
+
         if camera_data is None:
             print("camera_data is None")
         else:
@@ -149,6 +162,17 @@ def main():
             vx=measured_vx,
             vy=measured_vy,
             wz=measured_wz,
+        )
+
+        bridge.send_joint_states(
+            names=JOINT_NAMES,
+            position=relative_dof_pos,
+            velocity=dof_vel,
+        )
+
+        bridge.send_imu(
+            ang_vel=base_ang_vel,
+            lin_acc=base_lin_acc,
         )
 
         print(
