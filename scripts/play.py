@@ -4,7 +4,6 @@ assert isaacgym
 import torch
 import numpy as np
 import cv2
-from pathlib import Path
 
 import glob
 import pickle as pkl
@@ -15,14 +14,8 @@ from aliengo_gym.envs.aliengo.aliengo_config import config_aliengo
 from aliengo_gym.envs.aliengo.velocity_tracking import VelocityTrackingEasyEnv
 
 from tqdm import tqdm
-
-DEFAULT_RUN_LABEL = "gait-conditioned-agility/aliengo-v0/train"
-REALSENSE_D435_COLOR_WIDTH = 640
-REALSENSE_D435_COLOR_HEIGHT = 360
-REALSENSE_D435_DEPTH_WIDTH = 848
-REALSENSE_D435_DEPTH_HEIGHT = 480
-REALSENSE_D435_COLOR_FOV_H_DEG = 69.0
-REALSENSE_D435_DEPTH_FOV_H_DEG = 87.0
+from datetime import datetime
+import os
 
 
 def load_policy(logdir):
@@ -40,16 +33,9 @@ def load_policy(logdir):
     return policy
 
 
-def _resolve_logdir(label: str) -> str:
-    runs_root = Path(__file__).resolve().parents[1] / "runs"
-    candidates = sorted(path for path in (runs_root / label).glob("*") if path.is_dir())
-    if not candidates:
-        raise FileNotFoundError(f"No run directories found under {runs_root / label}")
-    return str(candidates[0])
-
-
-def load_env(label, headless=False):
-    logdir = _resolve_logdir(label)
+def load_env(label, headless=False, seed=0):
+    dirs = glob.glob(f"../runs/{label}/*")
+    logdir = sorted(dirs)[0]
 
     with open(logdir + "/parameters.pkl", 'rb') as file:
         pkl_cfg = pkl.load(file)
@@ -92,25 +78,22 @@ def load_env(label, headless=False):
     Cfg.domain_rand.randomize_lag_timesteps = True
     Cfg.control.control_type = "P"
 
-    Cfg.env.episode_length_s = 600
+    Cfg.env.episode_length_s = 300
 
     Cfg.env.front_camera_enabled = True
     Cfg.env.front_camera_attach_body_name = "trunk"
-    # RealSense D435-like camera profile:
-    # RGB: ~69 deg horizontal FOV, compact 16:9 stream
-    # Depth: ~87 deg horizontal FOV, 848x480 mode
-    Cfg.env.front_camera_color_width_px = REALSENSE_D435_COLOR_WIDTH
-    Cfg.env.front_camera_color_height_px = REALSENSE_D435_COLOR_HEIGHT
-    Cfg.env.front_camera_depth_width_px = REALSENSE_D435_DEPTH_WIDTH
-    Cfg.env.front_camera_depth_height_px = REALSENSE_D435_DEPTH_HEIGHT
-    Cfg.env.front_camera_color_fov_h_deg = REALSENSE_D435_COLOR_FOV_H_DEG
-    Cfg.env.front_camera_depth_fov_h_deg = REALSENSE_D435_DEPTH_FOV_H_DEG
+    Cfg.env.front_camera_color_width_px = 640
+    Cfg.env.front_camera_color_height_px = 360
+    Cfg.env.front_camera_depth_width_px = 848
+    Cfg.env.front_camera_depth_height_px = 480
+    Cfg.env.front_camera_color_fov_h_deg = 70.0
+    Cfg.env.front_camera_depth_fov_h_deg = 86.0
     Cfg.env.front_camera_offset_xyz = [0.315, 0.0, 0.052]
     Cfg.env.front_camera_pitch_deg = -4.0
 
     from aliengo_gym.envs.wrappers.history_wrapper import HistoryWrapper
 
-    env = VelocityTrackingEasyEnv(seed=10, sim_device='cuda:0', headless=headless, cfg=Cfg)
+    env = VelocityTrackingEasyEnv(seed=seed, sim_device='cuda:0', headless=headless, cfg=Cfg)
     env = HistoryWrapper(env)
 
     # load policy
@@ -130,9 +113,11 @@ def play_aliengo(headless=True):
     import glob
     import os
 
-    label = DEFAULT_RUN_LABEL
+    label = "gait-conditioned-agility/aliengo-v0/train"
+    seed = 0
 
-    env, policy = load_env(label, headless=headless)
+    env, policy = load_env(label, headless=headless, seed=seed)
+    SEQUENCE_OF_OBJECTS = env.SEQUENCE_OF_OBJECTS
 
     num_eval_steps = 1000000
     gaits = {"pronking": [0, 0, 0],
@@ -156,6 +141,76 @@ def play_aliengo(headless=True):
 
     obs = env.reset()
 
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_dir = os.path.join(MINI_GYM_ROOT_DIR, "logs", timestamp)
+    os.makedirs(log_dir, exist_ok=True)
+
+    log_path = os.path.join(log_dir, f"log_seed_{seed}.txt")
+    log_file = open(log_path, "w+")
+
+    print(f"[LOG] Saving log to: {log_path}")
+
+    object_positions = env.detectable_object_positions
+    
+    log_file.write(f"seed={seed}\n\n")
+    log_file.write(f"SEQUENCE_OF_OBJECTS = {SEQUENCE_OF_OBJECTS}\n")
+
+    for obj in object_positions:
+        log_file.write(
+            f"object {obj['id']}: "
+            f"cell=({obj['cell_x']}, {obj['cell_y']}), "
+            f"world=({obj['x']:.2f}, {obj['y']:.2f})\n"
+        )
+
+    log_file.write("\n")
+    log_file.write("detected_objects = {}\n")
+    log_file.write("\nt,x,y,yaw\n")
+    log_file.flush()
+
+    detected_objects = {}
+
+    def log_detected_object(object_id):
+        nonlocal detected_objects, log_file, t, x, y, yaw
+
+        if object_id in detected_objects:
+            return
+
+        detected_objects[object_id] = {
+            "t": round(t, 3),
+            "x": round(x, 4),
+            "y": round(y, 4),
+            "yaw": round(yaw, 4),
+        }
+
+        log_file.seek(0)
+        lines = log_file.readlines()
+
+        new_block = "detected_objects = {\n"
+        for k, v in detected_objects.items():
+            new_block += f"{k}: {v},\n"
+        new_block += "}\n"
+
+        start, end = None, None
+
+        for i, line in enumerate(lines):
+            if line.startswith("detected_objects"):
+                start = i
+                if line.strip().endswith("}"):
+                    end = i
+                else:
+                    for j in range(i+1, len(lines)):
+                        if lines[j].strip() == "}":
+                            end = j
+                            break
+                break
+
+        lines[start:end+1] = [new_block]
+
+        log_file.seek(0)
+        log_file.writelines(lines)
+        log_file.truncate()
+        log_file.flush()
+
     for i in tqdm(range(num_eval_steps)):
         with torch.no_grad():
             actions = policy(obs)
@@ -178,6 +233,24 @@ def play_aliengo(headless=True):
         env.commands[:, 12] = stance_width_cmd
         obs, rew, done, info = env.step(actions)
 
+        t = i * env.dt
+
+        x = env.root_states[0, 0].item()
+        y = env.root_states[0, 1].item()
+        quat = env.root_states[0, 3:7]
+
+        yaw = torch.atan2(
+            2.0 * (quat[3]*quat[2] + quat[0]*quat[1]),
+            1.0 - 2.0 * (quat[1]**2 + quat[2]**2)
+        ).item()
+
+        log_file.write(f"{t:.3f},{x:.4f},{y:.4f},{yaw:.4f}\n")
+        log_file.flush()
+
+        # IMPORTANT! Add each detected object here:
+        # if YOUR_CONDITION:
+        #     log_detected_object(DETECTED_OBJECT_ID)
+
         camera_data = env.get_front_camera_data(0)
         if camera_data is not None:
             rgb = camera_data["image"]
@@ -195,25 +268,6 @@ def play_aliengo(headless=True):
 
         measured_x_vels[i] = env.base_lin_vel[0, 0]
         joint_positions[i] = env.dof_pos[0, :].cpu().numpy()
-
-    # plot target and measured forward velocity
-    from matplotlib import pyplot as plt
-    fig, axs = plt.subplots(2, 1, figsize=(12, 5))
-    axs[0].plot(np.linspace(0, num_eval_steps * env.dt, num_eval_steps), measured_x_vels, color='black', linestyle="-", label="Measured")
-    axs[0].plot(np.linspace(0, num_eval_steps * env.dt, num_eval_steps), target_x_vels, color='black', linestyle="--", label="Desired")
-    axs[0].legend()
-    axs[0].set_title("Forward Linear Velocity")
-    axs[0].set_xlabel("Time (s)")
-    axs[0].set_ylabel("Velocity (m/s)")
-
-    axs[1].plot(np.linspace(0, num_eval_steps * env.dt, num_eval_steps), joint_positions, linestyle="-", label="Measured")
-    axs[1].set_title("Joint Positions")
-    axs[1].set_xlabel("Time (s)")
-    axs[1].set_ylabel("Joint Position (rad)")
-
-    plt.tight_layout()
-    plt.show()
-    cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':
