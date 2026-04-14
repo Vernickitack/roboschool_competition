@@ -14,13 +14,13 @@ import torch
 from aliengo_gym import MINI_GYM_ROOT_DIR
 from aliengo_gym.envs.base.base_task import BaseTask
 from aliengo_gym.utils.math_utils import quat_apply_yaw, wrap_to_pi, get_scale_shift
-from aliengo_gym.utils.terrain import Terrain
+from aliengo_gym.utils.roboschool_terrain import Terrain
 from .legged_robot_config import Cfg
 
 
 class LeggedRobot(BaseTask):
     def __init__(self, cfg: Cfg, sim_params, physics_engine, sim_device, headless, eval_cfg=None,
-                 initial_dynamics_dict=None):
+                 initial_dynamics_dict=None, seed=0):
         """ Parses the provided config file,
             calls create_sim() (which creates, simulation, terrain and environments),
             initilizes pytorch buffers used during training
@@ -37,9 +37,10 @@ class LeggedRobot(BaseTask):
         self.eval_cfg = eval_cfg
         self.sim_params = sim_params
         self.height_samples = None
-        self.debug_viz = False
+        self.debug_viz = True
         self.init_done = False
         self.initial_dynamics_dict = initial_dynamics_dict
+        self.seed = int(seed)
         if eval_cfg is not None: self._parse_cfg(eval_cfg)
         self._parse_cfg(self.cfg)
 
@@ -141,10 +142,10 @@ class LeggedRobot(BaseTask):
     def check_termination(self):
         """ Check if environments need to be reset
         """
-        self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.,
-                                   dim=1)
+        # self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.,
+                                #    dim=1)
         self.time_out_buf = self.episode_length_buf > self.cfg.env.max_episode_length  # no terminal reward for time-outs
-        self.reset_buf |= self.time_out_buf
+        self.reset_buf = self.time_out_buf
         if self.cfg.rewards.use_terminal_body_height:
             self.body_height_buf = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1) \
                                    < self.cfg.rewards.terminal_body_height
@@ -503,9 +504,23 @@ class LeggedRobot(BaseTask):
         mesh_type = self.cfg.terrain.mesh_type
         if mesh_type in ['heightfield', 'trimesh']:
             if self.eval_cfg is not None:
-                self.terrain = Terrain(self.cfg.terrain, self.num_train_envs, self.eval_cfg.terrain, self.num_eval_envs)
+                # self.terrain = Terrain(self.cfg.terrain, self.num_train_envs, self.eval_cfg.terrain, self.num_eval_envs)
+                self.terrain = Terrain(
+                    horizontal_scale=self.cfg.terrain.horizontal_scale,
+                    vertical_scale=self.cfg.terrain.vertical_scale,
+                    border_size=self.cfg.terrain.border_size,
+                    mesh_type=self.cfg.terrain.mesh_type,
+                    slope_treshold=self.cfg.terrain.slope_treshold,
+                )
             else:
-                self.terrain = Terrain(self.cfg.terrain, self.num_train_envs)
+                # self.terrain = Terrain(self.cfg.terrain, self.num_train_envs)
+                self.terrain = Terrain(
+                    horizontal_scale=self.cfg.terrain.horizontal_scale,
+                    vertical_scale=self.cfg.terrain.vertical_scale,
+                    border_size=self.cfg.terrain.border_size,
+                    mesh_type=self.cfg.terrain.mesh_type,
+                    slope_treshold=self.cfg.terrain.slope_treshold,
+                )
         if mesh_type == 'plane':
             self._create_ground_plane()
         elif mesh_type == 'heightfield':
@@ -1303,13 +1318,8 @@ class LeggedRobot(BaseTask):
     def _init_command_distribution(self, env_ids):
         # new style curriculum
         self.category_names = ['nominal']
-        fixed_gait = getattr(self.cfg.commands, "fixed_gait", None)
-        if fixed_gait is not None:
-            self.category_names = [fixed_gait]
         if self.cfg.commands.gaitwise_curricula:
             self.category_names = ['pronk', 'trot', 'pace', 'bound']
-            if fixed_gait is not None:
-                self.category_names = [fixed_gait]
 
         if self.cfg.commands.curriculum_type == "RewardThresholdCurriculum":
             from .curriculum import RewardThresholdCurriculum
@@ -1368,8 +1378,8 @@ class LeggedRobot(BaseTask):
             for curriculum in self.curricula:
                 curriculum.set_params(lipschitz_threshold=self.cfg.commands.lipschitz_threshold,
                                       binary_phases=self.cfg.commands.binary_phases)
-        self.env_command_bins = np.zeros(len(env_ids), dtype=int)
-        self.env_command_categories = np.zeros(len(env_ids), dtype=int)
+        self.env_command_bins = np.zeros(len(env_ids), dtype=np.int)
+        self.env_command_categories = np.zeros(len(env_ids), dtype=np.int)
         low = np.array(
             [self.cfg.commands.lin_vel_x[0], self.cfg.commands.lin_vel_y[0],
              self.cfg.commands.ang_vel_yaw[0], self.cfg.commands.body_height_cmd[0],
@@ -1487,6 +1497,69 @@ class LeggedRobot(BaseTask):
         self.height_samples = torch.tensor(self.terrain.heightsamples).view(self.terrain.tot_rows,
                                                                             self.terrain.tot_cols).to(self.device)
 
+    def _generate_object_positions_from_heightfield(
+        self,
+        num_boxes,
+        obstacle_clearance_m=1.0,
+        object_spacing_m=3.0,
+    ):
+        rng = np.random.default_rng(self.seed)
+
+        hf = self.terrain.height_field_raw
+        h_scale = self.cfg.terrain.horizontal_scale
+
+        obstacle_clearance_cells = int(np.ceil(obstacle_clearance_m / h_scale))   # 1.0 / 0.1 = 10
+        object_spacing_cells = int(np.ceil(object_spacing_m / h_scale))           # 3.0 / 0.1 = 30
+
+        obstacle_cells = np.argwhere(hf != 0)
+        placed_cells = []
+
+        max_tries = 20000
+
+        n_rows, n_cols = hf.shape
+
+        for _ in range(max_tries):
+            if len(placed_cells) == num_boxes:
+                break
+
+            x_cell = int(rng.integers(0, n_rows))
+            y_cell = int(rng.integers(0, n_cols))
+
+            if hf[x_cell, y_cell] == 1:
+                continue
+
+            valid = True
+            if len(obstacle_cells) > 0:
+                dx = obstacle_cells[:, 0] - x_cell
+                dy = obstacle_cells[:, 1] - y_cell
+                dist2 = dx * dx + dy * dy
+                if np.any(dist2 < obstacle_clearance_cells * obstacle_clearance_cells):
+                    valid = False
+
+            if not valid:
+                continue
+
+            for px, py in placed_cells:
+                if (x_cell - px) ** 2 + (y_cell - py) ** 2 < object_spacing_cells * object_spacing_cells:
+                    valid = False
+                    break
+
+            if not valid:
+                continue
+
+            placed_cells.append((x_cell, y_cell))
+
+        if len(placed_cells) < num_boxes:
+            raise RuntimeError(
+                f"Could not place {num_boxes} objects with the requested clearances. "
+                f"Placed only {len(placed_cells)}."
+            )
+
+        x_boxes = [x * h_scale for x, _ in placed_cells]
+        y_boxes = [y * h_scale for _, y in placed_cells]
+
+        return x_boxes, y_boxes, placed_cells
+
     def _create_envs(self):
         """ Creates environments:
              1. loads the robot URDF/MJCF asset,
@@ -1597,6 +1670,88 @@ class LeggedRobot(BaseTask):
                 gymapi.Vec3(1.0, 0.0, 0.0), math.radians(camera_pitch)
             )
 
+            object_asset_options = gymapi.AssetOptions()
+            object_asset_options.fix_base_link = True
+            object_asset_options.use_mesh_materials = True
+
+            object_asset_specs = [
+                ("backpack", "textured_box.urdf"),
+                ("bottle", "textured_box.urdf"),
+                ("chair", "textured_box.urdf"),
+                ("cup", "textured_box.urdf"),
+                ("laptop", "textured_box.urdf"),
+            ]
+
+            self.object_assets = []
+            for asset_folder, asset_file in object_asset_specs:
+                asset_root = os.path.join(MINI_GYM_ROOT_DIR, "resources", "assets", "objects", asset_folder)
+                asset = self.gym.load_asset(
+                    self.sim,
+                    asset_root,
+                    asset_file,
+                    object_asset_options
+                )
+                self.object_assets.append(asset)
+
+        photo_asset_root = os.path.join(MINI_GYM_ROOT_DIR, "resources", "assets", "logo")
+        photo_asset_file = "logo.urdf"
+
+        photo_asset_options = gymapi.AssetOptions()
+        photo_asset_options.fix_base_link = True
+        photo_asset_options.use_mesh_materials = True
+
+        self.photo_asset = self.gym.load_asset(
+            self.sim,
+            photo_asset_root,
+            photo_asset_file,
+            photo_asset_options
+        )
+
+        num_boxes = 5
+
+        x_boxes, y_boxes, placed_cells = self._generate_object_positions_from_heightfield(
+            num_boxes=num_boxes,
+            obstacle_clearance_m=1.0,
+            object_spacing_m=3.0,
+        )
+
+        self.detectable_object_positions = [
+            {
+                "id": k,
+                "x": float(x_boxes[k]),
+                "y": float(y_boxes[k]),
+                "z": 0.25,
+                "cell_x": int(placed_cells[k][0]),
+                "cell_y": int(placed_cells[k][1]),
+            }
+            for k in range(num_boxes)
+        ]
+
+        # object id → name mapping
+        self.object_id_to_name = {
+            0: "backpack",
+            1: "bottle",
+            2: "chair",
+            3: "cup",
+            4: "laptop",
+        }
+
+        rng = np.random.default_rng(self.seed)
+        ids = list(self.object_id_to_name.keys())
+        rng.shuffle(ids)
+
+        self.SEQUENCE_OF_OBJECTS = [(i, self.object_id_to_name[i]) for i in ids]
+
+        print(f"[Sequence] {self.SEQUENCE_OF_OBJECTS}")
+
+        print(f"[Object placement] seed={self.seed}")
+        for k in range(num_boxes):
+            print(
+                f"object {k}: "
+                f"cell=({placed_cells[k][0]}, {placed_cells[k][1]}), "
+                f"world=({x_boxes[k]:.2f}, {y_boxes[k]:.2f})"
+            )
+
         for i in range(self.num_envs):
             # create env instance
             env_handle = self.gym.create_env(self.sim, env_lower, env_upper, int(np.sqrt(self.num_envs)))
@@ -1616,6 +1771,30 @@ class LeggedRobot(BaseTask):
             body_props = self.gym.get_actor_rigid_body_properties(env_handle, anymal_handle)
             body_props = self._process_rigid_body_props(body_props, i)
             self.gym.set_actor_rigid_body_properties(env_handle, anymal_handle, body_props, recomputeInertia=True)
+
+            photo_pose = gymapi.Transform()
+            photo_pose.p = gymapi.Vec3(-1.0, 10.0, 3.0)
+            q_x = gymapi.Quat.from_axis_angle(gymapi.Vec3(1.0, 0.0, 0.0), math.pi)
+            q_y = gymapi.Quat.from_axis_angle(gymapi.Vec3(0.0, 1.0, 0.0), math.pi)
+            q_z = gymapi.Quat.from_axis_angle(gymapi.Vec3(0.0, 0.0, 1.0), -math.pi / 2)
+            photo_pose.r = q_z * q_y * q_x
+
+            photo_handle = self.gym.create_actor(
+                env_handle,
+                self.photo_asset,
+                photo_pose,
+                "photo_frame",
+                i,
+                0,
+                0
+            )
+
+            self.gym.set_actor_scale(env_handle, photo_handle, 4.0)
+
+            photo_body_props = self.gym.get_actor_rigid_body_properties(env_handle, photo_handle)
+            for p in photo_body_props:
+                p.flags = gymapi.RIGID_BODY_DISABLE_GRAVITY
+            self.gym.set_actor_rigid_body_properties(env_handle, photo_handle, photo_body_props, recomputeInertia=True)
 
             if self.front_camera_enabled:
                 camera_body_handle = self.gym.find_actor_rigid_body_handle(
@@ -1645,8 +1824,30 @@ class LeggedRobot(BaseTask):
                 self.front_camera_color_handles.append(color_camera_handle)
                 self.front_camera_depth_handles.append(depth_camera_handle)
 
+
             self.envs.append(env_handle)
             self.actor_handles.append(anymal_handle)
+
+            for b in range(num_boxes):
+                x, y = x_boxes[b], y_boxes[b]
+
+                pose = gymapi.Transform()
+                pose.p = gymapi.Vec3(x, y, 0.25)
+                q_x = gymapi.Quat.from_axis_angle(gymapi.Vec3(1.0, 0.0, 0.0), math.pi / 2.0)
+                q_z = gymapi.Quat.from_axis_angle(gymapi.Vec3(0.0, 0.0, 1.0), math.pi)
+                pose.r = q_z * q_x
+
+                box_handle = self.gym.create_actor(
+                    env_handle,
+                    self.object_assets[b],
+                    pose,
+                    f"box_{b}",
+                    i,
+                    0,
+                    0
+                )
+
+                pass
 
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):
@@ -1804,8 +2005,8 @@ class LeggedRobot(BaseTask):
                                                     (len(env_ids) / cfg.terrain.num_cols), rounding_mode='floor').to(
                     torch.long)
             cfg.terrain.max_terrain_level = cfg.terrain.num_rows
-            cfg.terrain.terrain_origins = torch.from_numpy(cfg.terrain.env_origins).to(self.device).to(torch.float)
-            self.env_origins[env_ids] = cfg.terrain.terrain_origins[
+            terrain_origins = torch.from_numpy(self.terrain.env_origins).to(self.device).to(torch.float)
+            self.env_origins[env_ids] = terrain_origins[
                 self.terrain_levels[env_ids], self.terrain_types[env_ids]]
         else:
             self.custom_origins = False
@@ -1837,26 +2038,49 @@ class LeggedRobot(BaseTask):
             cfg.domain_rand.gravity_rand_interval * cfg.domain_rand.gravity_impulse_duration)
 
     def _draw_debug_vis(self):
-        """ Draws visualizations for dubugging (slows down simulation a lot).
-            Default behaviour: draws height measurement points
-        """
-        # draw height lines
-        if not self.terrain.cfg.measure_heights:
-            return
         self.gym.clear_lines(self.viewer)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
-        sphere_geom = gymutil.WireframeSphereGeometry(0.02, 4, 4, None, color=(1, 1, 0))
-        for i in range(self.num_envs):
-            base_pos = (self.root_states[i, :3]).cpu().numpy()
-            heights = self.measured_heights[i].cpu().numpy()
-            height_points = quat_apply_yaw(self.base_quat[i].repeat(heights.shape[0]),
-                                           self.height_points[i]).cpu().numpy()
-            for j in range(heights.shape[0]):
-                x = height_points[j, 0] + base_pos[0]
-                y = height_points[j, 1] + base_pos[1]
-                z = heights[j]
-                sphere_pose = gymapi.Transform(gymapi.Vec3(x, y, z), r=None)
-                gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[i], sphere_pose)
+
+        if hasattr(self.terrain.cfg, "measure_heights") and self.terrain.cfg.measure_heights:
+            yellow_sphere = gymutil.WireframeSphereGeometry(0.02, 4, 4, None, color=(1, 1, 0))
+            for i in range(self.num_envs):
+                base_pos = (self.root_states[i, :3]).cpu().numpy()
+                heights = self.measured_heights[i].cpu().numpy()
+                height_points = quat_apply_yaw(
+                    self.base_quat[i].repeat(heights.shape[0]),
+                    self.height_points[i]
+                ).cpu().numpy()
+
+                for j in range(heights.shape[0]):
+                    x = height_points[j, 0] + base_pos[0]
+                    y = height_points[j, 1] + base_pos[1]
+                    z = heights[j]
+                    sphere_pose = gymapi.Transform(gymapi.Vec3(x, y, z), r=None)
+                    gymutil.draw_lines(yellow_sphere, self.gym, self.viewer, self.envs[i], sphere_pose)
+
+        if not hasattr(self, "detectable_object_positions"):
+            return
+
+        radius_m = 1.5
+        num_circle_points = 72
+        point_radius = 0.01
+        z_draw = 0.03
+
+        red_sphere = gymutil.WireframeSphereGeometry(point_radius, 4, 4, None, color=(1, 0, 0))
+
+        for env_id in range(self.num_envs):
+            for obj in self.detectable_object_positions:
+                cx = obj["x"]
+                cy = obj["y"]
+
+                for k in range(num_circle_points):
+                    theta = 2.0 * np.pi * k / num_circle_points
+                    px = cx + radius_m * np.cos(theta)
+                    py = cy + radius_m * np.sin(theta)
+                    pz = z_draw
+
+                    sphere_pose = gymapi.Transform(gymapi.Vec3(px, py, pz), r=None)
+                    gymutil.draw_lines(red_sphere, self.gym, self.viewer, self.envs[env_id], sphere_pose)
 
     def _init_height_points(self, env_ids, cfg):
         """ Returns points at which the height measurments are sampled (in base frame)
@@ -1895,7 +2119,11 @@ class LeggedRobot(BaseTask):
         points = quat_apply_yaw(self.base_quat[env_ids].repeat(1, cfg.env.num_height_points),
                                 self.height_points[env_ids]) + (self.root_states[env_ids, :3]).unsqueeze(1)
 
-        points += self.terrain.cfg.border_size
+        points[:, :, 0] += self.terrain.terrain_width / 2.0
+        points[:, :, 1] += self.terrain.terrain_length / 2.0
+        points[:, :, 0] += self.terrain.cfg.border_size
+        points[:, :, 1] += self.terrain.cfg.border_size
+        points = (points / self.terrain.cfg.horizontal_scale).long()
         points = (points / self.terrain.cfg.horizontal_scale).long()
         px = points[:, :, 0].view(-1)
         py = points[:, :, 1].view(-1)

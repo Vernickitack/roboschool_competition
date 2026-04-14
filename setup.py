@@ -8,7 +8,7 @@ setup(
     license="BSD-3-Clause",
     packages=find_packages(),
     author_email='gmargo@mit.edu',
-    description='Minimal competition repo for RL locomotion on the Unitree AlienGo.',
+    description='Toolkit for deployment of sim-to-real RL on the Unitree AlienGo.',
     install_requires=['ml_logger==0.8.117',
                       'ml_dash==0.3.20',
                       'jaynes>=0.9.2',

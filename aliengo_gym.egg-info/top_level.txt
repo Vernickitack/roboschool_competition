@@ -1,4 +1,5 @@
 aliengo_gym
-aliengo_gym_learn
-configs
+go1_gym
+go1_gym_deploy
+go1_gym_learn
 scripts

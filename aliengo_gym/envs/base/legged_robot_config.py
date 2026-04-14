@@ -15,7 +15,7 @@ class Cfg(PrefixProto, cli=False):
         num_observation_history = 15
         env_spacing = 3.  # not used with heightfields/trimeshes
         send_timeouts = True  # send time out information to the algorithm
-        episode_length_s = 20  # episode length in seconds
+        episode_length_s = 600  # episode length in seconds
         observe_vel = True
         observe_only_ang_vel = False
         observe_only_lin_vel = False
@@ -35,8 +35,8 @@ class Cfg(PrefixProto, cli=False):
         num_recording_envs = 1
         front_camera_enabled = False
         front_camera_attach_body_name = "trunk"
-        front_camera_offset_xyz = [0.27, 0.0, 0.03]
-        front_camera_pitch_deg = 0.0
+        front_camera_offset_xyz = [0.315, 0.0, 0.052]
+        front_camera_pitch_deg = -4.0
         # Depth FOV target: 86 x 57 (H x V)
         front_camera_depth_width_px = 640
         front_camera_depth_height_px = 424
@@ -95,8 +95,8 @@ class Cfg(PrefixProto, cli=False):
         max_init_terrain_level = 5  # starting curriculum state
         terrain_length = 8.
         terrain_width = 8.
-        num_rows = 15  # number of terrain rows (levels)
-        num_cols = 15  # number of terrain cols (types)
+        num_rows = 10  # number of terrain rows (levels)
+        num_cols = 20  # number of terrain cols (types)
         # terrain types: [smooth slope, rough slope, stairs up, stairs down, discrete]
         terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
         # trimesh only:
@@ -203,7 +203,6 @@ class Cfg(PrefixProto, cli=False):
         pacing_offset = False
         balance_gait_distribution = True
         gaitwise_curricula = True
-        fixed_gait = None
 
     class curriculum_thresholds(PrefixProto, cli=False):
         tracking_lin_vel = 0.8  # closer to 1 is tighter

@@ -69,7 +69,7 @@ def config_aliengo(Cnfg: Union[Cfg, Meta]):
     _ = Cnfg.env
     _.num_observations = 42
     _.observe_vel = False
-    _.num_envs = 4096
+    _.num_envs = 4000
 
     _ = Cnfg.commands
     _.lin_vel_x = [-1.5, 1.5]
