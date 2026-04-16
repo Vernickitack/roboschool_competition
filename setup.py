@@ -15,7 +15,8 @@ setup(
                       'tqdm',
                       'matplotlib',
                       'numpy>=1.19.5,<1.24',
-                      'opencv-python'
+                      'opencv-python',
+                      'ultralytics'
                       ],
     extras_require={
         'train': [
